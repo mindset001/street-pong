@@ -1,0 +1,20 @@
+{
+  "name": "street-pong",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "3D multiplayer table tennis with accounts, competitions and a leaderboard",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node test/sim.test.js && node test/e2e.test.js",
+    "test:ui": "node test/ui.test.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "express": "^5.3.0",
+    "jsonwebtoken": "^9.0.3",
+    "three": "^0.186.1",
+    "ws": "^8.22.0"
+  }
+}
