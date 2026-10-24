@@ -1,5 +1,6 @@
 import { Scene } from './scene.js';
 import { sfx } from './audio.js';
+import { Voice } from './voice.js';
 
 // ---------- helpers ----------
 const $ = (s) => document.querySelector(s);
@@ -52,13 +53,14 @@ function connect() {
   ws.onopen = () => ws.send(JSON.stringify({ t: 'auth', token: S.token }));
   ws.onmessage = (e) => { try { onMsg(JSON.parse(e.data)); } catch (err) { console.error(err); } };
   ws.onclose = (e) => {
-    $('#net-dot').classList.remove('on');
+    $('#net-dot').classList.remove('on'); voice.leave(false);
     if (e.code === 4002) return logout();
     if (e.code === 4003) return; // replaced by a newer tab, don't fight it
     if (S.token) wsTimer = setTimeout(connect, Math.min(8000, 500 * 2 ** retry++));
   };
 }
 const send = (m) => ws?.readyState === 1 && ws.send(JSON.stringify(m));
+const voice = new Voice(send, () => renderVoice(), (m) => toast(m, 'bad'));
 
 function onMsg(m) {
   switch (m.t) {
@@ -70,6 +72,10 @@ function onMsg(m) {
     case 'start': startGame(m); break;
     case 's': onSnapshot(m); break;
     case 'over': endGame(m); break;
+    case 'chat': addChat(m); break;
+    case 'muted': onMuted(m); break;
+    case 'unwatched': leaveGameView(); break;
+    case 'voice_peers': case 'voice_joined': case 'voice_left': case 'voice_closed': case 'rtc': voice.handle(m); break;
     case 'comp': if (current.compId === m.id) renderRoute(); break;
     case 'comp_match':
       toast(`Your match in “${m.name}” is ready!`, 'good', { label: 'Go to bracket', fn: () => { location.hash = `#/competition/${m.compId}`; } });
@@ -77,7 +83,19 @@ function onMsg(m) {
       break;
   }
 }
+async function loadLive() {
+  const box = $('#live'); if (!box) return;
+  try {
+    const { games } = await api('/live');
+    box.replaceChildren(...(games.length ? games.map((g) => el('div', { class: 'live' },
+      el('div', {}, el('b', {}, `${g.players[0]} vs ${g.players[1]}`), ' ', el('span', { class: 'sc' }, `${g.score[0]}–${g.score[1]}`),
+        el('div', { class: 'dim', style: 'font-size:.85em' }, g.competition ? `🏆 ${g.competition} · ` : 'Ranked · ', `${g.spectators} watching`, g.voice ? ` · 🎙 ${g.voice} in voice` : '')),
+      el('button', { class: 'alt', onclick: () => send({ t: 'watch', gid: g.gid }) }, 'Watch'))) : [el('p', { class: 'dim', style: 'margin:0' }, 'No games in progress right now.')]));
+  } catch { /* transient */ }
+}
 function updateLobbyStats() {
+  if (S.lobby.playing !== liveSeen && $('#live')) loadLive();
+  liveSeen = S.lobby.playing;
   const n = $('#lobby-stats');
   if (n) n.textContent = `${S.lobby.online} online · ${S.lobby.playing} games live · ${S.lobby.queued} searching`;
 }
@@ -122,6 +140,7 @@ function authView() {
 }
 
 // ---------- views ----------
+let liveSeen = -1;
 const current = { compId: null };
 
 function homeView() {
@@ -145,6 +164,7 @@ function homeView() {
         el('div', { class: 'actions' }, el('button', { class: 'ghost', onclick: () => { location.hash = '#/competitions'; } }, 'Browse'))),
       el('div', { class: 'panel card' }, el('h2', {}, 'Leaderboard'), el('p', {}, 'See who rules the table.'),
         el('div', { class: 'actions' }, el('button', { class: 'ghost', onclick: () => { location.hash = '#/leaderboard'; } }, 'Rankings'), el('button', { class: 'ghost', onclick: () => profileModal(u.username) }, 'My profile')))),
+    el('div', { class: 'panel', style: 'margin-top:16px' }, el('h2', {}, 'Live now'), el('div', { id: 'live' }, el('p', { class: 'dim', style: 'margin:0' }, 'Loading…'))),
     el('div', { class: 'panel', style: 'margin-top:16px' }, el('h3', {}, 'How to play'),
       el('p', { class: 'dim', style: 'margin:0' }, 'Move the mouse (or drag a finger) to steer your paddle. Click or press Space to serve. Let the ball bounce on your side, then meet it with the paddle: a quick swing hits harder and deeper but is less accurate; where the ball meets the paddle steers it left or right. Don’t clip the net, and don’t let it bounce twice. First to 11, win by 2.')));
 }
@@ -252,7 +272,7 @@ async function competitionView(root, id) {
       const iAmReady = m.ready.includes(me);
       foot = el('div', { class: 'foot' }, el('span', { class: 'dim' }, `${m.ready.length}/2 ready`),
         mine ? (iAmReady ? el('button', { class: 'ghost', onclick: () => send({ t: 'comp_unready', matchId: m.id }) }, 'Waiting… (cancel)') : el('button', { onclick: () => send({ t: 'comp_ready', matchId: m.id }) }, 'Ready — play!')) : null);
-    } else if (m.status === 'playing') foot = el('div', { class: 'foot' }, el('span', { style: 'color:var(--accent-2)' }, '● Live'));
+    } else if (m.status === 'playing') foot = el('div', { class: 'foot' }, el('span', { style: 'color:var(--accent-2)' }, '● Live'), m.gid && !mine && el('button', { class: 'alt', onclick: () => send({ t: 'watch', gid: m.gid }) }, 'Watch'));
     return el('div', { class: `match ${m.status}` }, pl(m.p1, m.s1), pl(m.p2, m.s2), foot);
   };
   const n = d.rounds.length;
@@ -281,7 +301,7 @@ async function competitionView(root, id) {
 // ---------- router ----------
 function renderRoute() {
   const view = $('#view');
-  current.compId = null; current.reload = null;
+  current.compId = null; current.reload = null; clearInterval(current.timer);
   view.replaceChildren();
   if (S.game) { view.hidden = true; return; }
   view.hidden = false;
@@ -295,7 +315,7 @@ function renderRoute() {
   else if (route === 'competition' && Number(arg)) competitionView(view, Number(arg));
   else if (route === 'join' && arg) joinByCode(arg);
   else if (route === 'leaderboard') leaderboardView(view);
-  else { view.append(homeView()); updateLobbyStats(); }
+  else { view.append(homeView()); updateLobbyStats(); loadLive(); current.timer = setInterval(loadLive, 5000); }
 }
 addEventListener('hashchange', () => { if (!S.game) renderRoute(); });
 
@@ -316,14 +336,18 @@ let latest = null, lastSent = '', stateNow = 'serve';
 
 function startGame(m) {
   S.game = m; closeModal(); sfx.unlock();
-  scene.setMode('game', m.you); scene.reset();
+  scene.setMode(m.you < 0 ? 'watch' : 'game', m.you); scene.reset();
   $('#view').hidden = true; $('#topbar').hidden = true; $('#hud').hidden = false; document.body.classList.add('playing');
   const names = m.players.map((p) => p.username);
   document.querySelectorAll('#hud .name').forEach((n, i) => { n.textContent = names[i] + (i === m.you ? ' (you)' : ''); });
+  if (!m.resume) voice.leave(true);
+  buildChat(m); voice.forced = !!m.muted && !m.host;
+  if (m.you < 0) scene.setMode('watch');
+  renderVoice();
   $('#hud-p0').classList.toggle('me', m.you === 0); $('#hud-p1').classList.toggle('me', m.you === 1);
   $('#hud-target').textContent = m.target;
-  setScore(m.score || [0, 0]); say('Get ready…');
-  $('#hud-leave').textContent = m.kind === 'ai' ? 'Quit' : 'Forfeit';
+  setScore(m.score || [0, 0]); say(m.you < 0 ? `Watching ${names[0]} vs ${names[1]}` : 'Get ready…');
+  $('#hud-leave').textContent = m.you < 0 ? 'Stop watching' : m.kind === 'ai' ? 'Quit' : 'Forfeit';
 }
 function setScore(sc) {
   const pts = document.querySelectorAll('#hud .pts'); pts[0].textContent = sc[0]; pts[1].textContent = sc[1];
@@ -337,34 +361,53 @@ function onSnapshot(s) {
   $('#hud-p0').classList.toggle('serving', s.sv === 0); $('#hud-p1').classList.toggle('serving', s.sv === 1);
   for (const e of s.ev || []) {
     if (e.e === 'hit') sfx.hit(); else if (e.e === 'bounce') sfx.bounce(); else if (e.e === 'net') sfx.net();
-    else if (e.e === 'point') { sfx.point(e.p === you); say(e.p === you ? 'Point!' : 'Point to opponent'); }
+    else if (e.e === 'point') { sfx.point(you < 0 || e.p === you); say(you < 0 ? `Point: ${S.game.players[e.p].username}` : e.p === you ? 'Point!' : 'Point to opponent'); }
   }
   stateNow = s.st;
-  if (s.st === 'serve') say(s.sv === you ? 'Your serve' : 'Opponent serving', s.sv === you ? 'Click or press Space' : '');
+  if (s.st === 'serve') say(you < 0 ? `${S.game.players[s.sv].username} serving` : s.sv === you ? 'Your serve' : 'Opponent serving', s.sv === you ? 'Click or press Space' : '');
   else if (s.st === 'rally' && !(s.ev || []).some((e) => e.e === 'point')) say('');
 }
 
 function pointer(e) {
-  if (!S.game) return;
+  if (!S.game || S.game.you < 0) return;
   // On touch screens keep the paddle above the fingertip so it stays visible.
   const p = scene.pointerToPaddle(e.clientX, e.clientY - (e.pointerType === 'touch' ? 80 : 0));
   if (p) latest = p;
 }
 canvas.addEventListener('pointermove', pointer);
-canvas.addEventListener('pointerdown', (e) => { pointer(e); if (S.game) { sfx.unlock(); send({ t: 'serve' }); } });
-addEventListener('keydown', (e) => { if (S.game && e.code === 'Space') { e.preventDefault(); send({ t: 'serve' }); } });
+canvas.addEventListener('pointerdown', (e) => { pointer(e); if (S.game && S.game.you >= 0) { sfx.unlock(); send({ t: 'serve' }); } });
+addEventListener('keydown', (e) => {
+  if (S.game && e.key === 'Enter' && !/INPUT|BUTTON|SELECT/.test(e.target.tagName)) { e.preventDefault(); openChat(true); return; }
+  if (S.game && S.game.you >= 0 && e.code === 'Space' && !/INPUT|BUTTON/.test(e.target.tagName)) { e.preventDefault(); send({ t: 'serve' }); } });
 setInterval(() => {
-  if (!S.game || !latest) return;
+  if (!S.game || S.game.you < 0 || !latest) return;
   const k = `${latest.x.toFixed(3)},${latest.y.toFixed(3)}`;
   if (k !== lastSent) { lastSent = k; send({ t: 'p', x: latest.x, y: latest.y }); }
 }, 16);
 
-$('#hud-leave').onclick = () => { if (confirm(S.game?.kind === 'ai' ? 'Quit this game?' : 'Forfeit this game? It counts as a loss.')) send({ t: 'leave' }); };
+$('#hud-leave').onclick = () => { if (S.game?.you < 0) return send({ t: 'unwatch' }); if (confirm(S.game?.kind === 'ai' ? 'Quit this game?' : 'Forfeit this game? It counts as a loss.')) send({ t: 'leave' }); };
+
+function resetChat() { chat.log = null; $('#chat').replaceChildren(); }
+
+function leaveGameView() {
+  S.game = null; voice.leave(true); voice.forced = false; resetChat();
+  $('#hud').hidden = true; document.body.classList.remove('playing');
+  scene.setMode('menu'); closeModal(); renderRoute();
+}
 
 async function endGame(m) {
-  const g = S.game; S.game = null;
+  const g = S.game;
+  if (g && m.gid && g.gid !== m.gid) return; // stale
+  S.game = null; voice.leave(false); voice.forced = false; resetChat();
   $('#hud').hidden = true; document.body.classList.remove('playing');
   scene.setMode('menu');
+  if (m.you < 0) {
+    const names = g.players.map((p) => p.username);
+    modal(el('div', { class: 'panel' }, el('h2', {}, 'Game over'), el('div', { class: 'big' }, `${m.score[0]} – ${m.score[1]}`),
+      el('p', {}, el('b', {}, names[m.winner]), ' wins', m.forfeit ? ' (forfeit)' : '', '.'),
+      el('button', { onclick: () => { closeModal(); location.hash = m.comp ? `#/competition/${m.comp.id}` : '#/'; renderRoute(); } }, m.comp ? 'Back to bracket' : 'Back to lobby')));
+    renderRoute(); return;
+  }
   const won = m.winner === m.you;
   try { S.user = (await api('/auth/me')).user; } catch { /* keep stale */ }
   const again = m.kind === 'ai' ? () => { closeModal(); send({ t: 'ai', level: g?.players[1]?.username.match(/\((\w+)\)/)?.[1] || S.level }); }
@@ -379,6 +422,67 @@ async function endGame(m) {
       again && el('button', { onclick: again }, m.kind === 'ranked' ? 'Find another match' : 'Play again'),
       el('button', { class: 'ghost', onclick: () => { closeModal(); location.hash = m.comp ? `#/competition/${m.comp.id}` : '#/'; renderRoute(); } }, m.comp ? 'Back to bracket' : 'Menu'))));
   renderRoute();
+}
+
+// ---------- chat ----------
+const chat = { open: false, unread: 0, log: null, input: null, toggle: null, mute: null, host: false, muted: false };
+function buildChat(m) {
+  chat.host = !!m.host; chat.muted = !!m.muted; chat.open = false; chat.unread = 0;
+  chat.log = el('div', { class: 'log' });
+  chat.input = el('input', { maxlength: 200, placeholder: 'Say something…', autocomplete: 'off', enterkeyhint: 'send' });
+  chat.input.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Escape') { chat.input.blur(); openChat(false); } });
+  const form = el('form', { onsubmit: (e) => { e.preventDefault(); const text = chat.input.value.trim(); if (text) send({ t: 'chat', text }); chat.input.value = ''; } }, chat.input, el('button', { type: 'submit', class: 'alt' }, 'Send'));
+  chat.form = form; chat.toggle = el('button', { class: 'ghost', onclick: () => openChat(!chat.open) });
+  chat.mute = m.hasHost && chat.host ? el('button', { class: 'ghost', onclick: () => send({ t: 'mute_all', on: !chat.muted }) }) : null;
+  const root = $('#chat');
+  root.className = ''; root.replaceChildren(chat.log, form, el('div', { class: 'bar' }, chat.toggle, chat.mute));
+  form.hidden = true;
+  (m.chat || []).forEach((c) => addChat(c, true));
+  refreshChat();
+}
+function refreshChat() {
+  if (!chat.toggle) return;
+  chat.toggle.replaceChildren('💬 Chat', chat.unread ? el('span', { class: 'badge' }, chat.unread) : '');
+  if (chat.mute) { chat.mute.textContent = chat.muted ? '🔊 Unmute all' : '🔇 Mute all'; chat.mute.classList.toggle('danger', chat.muted); }
+  const blocked = chat.muted && !chat.host;
+  chat.input.disabled = blocked; chat.input.placeholder = blocked ? 'Chat muted by the host' : 'Say something…';
+}
+function openChat(on) {
+  chat.open = on; $('#chat').classList.toggle('open', on); chat.form.hidden = !on;
+  if (on) { chat.unread = 0; chat.log.scrollTop = chat.log.scrollHeight; if (!chat.input.disabled) chat.input.focus(); }
+  refreshChat();
+}
+function addChat(m, quiet = false) {
+  if (!chat.log) return;
+  const line = el('div', { class: `line ${m.sys ? 'sys' : ''} ${m.host ? 'host' : ''}` }, m.sys ? m.text : [el('b', {}, m.name + (m.host ? ' ★' : '') + ': '), m.text]);
+  chat.log.append(line);
+  while (chat.log.children.length > 60) chat.log.firstChild.remove();
+  setTimeout(() => line.classList.add('old'), quiet ? 0 : 7000);
+  chat.log.scrollTop = chat.log.scrollHeight;
+  if (!quiet && !chat.open && !m.sys && m.uid !== S.user.id) { chat.unread++; refreshChat(); }
+}
+function onMuted(m) {
+  chat.muted = m.on; chat.host = m.host || chat.host;
+  if (!m.host) voice.setForced(m.on);
+  addChat({ sys: true, text: m.on ? `${m.by} muted everyone` : `${m.by} unmuted everyone` });
+  refreshChat();
+}
+
+// ---------- voice panel ----------
+function renderVoice() {
+  const box = $('#voice');
+  if (!box) return;
+  if (!S.game) { box.replaceChildren(); return; }
+  if (!voice.active) {
+    box.replaceChildren(el('button', { class: 'ghost', style: 'background:var(--panel)', disabled: voice.joining, onclick: () => voice.join() }, voice.joining ? 'Connecting…' : '🎙 Join voice chat'));
+    return;
+  }
+  const others = voice.members();
+  box.replaceChildren(el('div', { class: 'vbox' },
+    el('div', {}, el('b', {}, '● Voice'), ' · ', others.length ? others.join(', ') : 'just you so far'),
+    el('div', { class: 'row' },
+      !voice.hasMic ? el('span', { class: 'dim' }, 'listen-only') : voice.forced ? el('button', { class: 'danger', disabled: true }, '🔇 Muted by host') : el('button', { class: voice.muted ? 'danger' : 'alt', onclick: () => voice.setMuted(!voice.muted) }, voice.muted ? '🔇 Unmute' : '🎙 Mute'),
+      el('button', { class: 'ghost', onclick: () => voice.leave(true) }, 'Leave'))));
 }
 
 // ---------- boot ----------

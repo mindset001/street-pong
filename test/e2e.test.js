@@ -58,6 +58,34 @@ assert.deepEqual(lb.map((p) => [p.username, p.rating]), [['bob', 1016], ['alice'
 const prof = (await api('/users/bob', a.token)).body;
 assert.equal(prof.rank, 1); assert.equal(prof.recent[0].won, true);
 
+// spectators + voice: carol and dave watch alice vs bob
+ca.send({ t: 'queue' }); cb.send({ t: 'queue' });
+const [ra, rb] = await Promise.all([ca.next((m) => m.t === 'start'), cb.next((m) => m.t === 'start')]);
+assert.equal((await api('/live', a.token)).body.games.length, 1);
+cc.send({ t: 'watch', gid: ra.gid });
+const ws1 = await cc.next((m) => m.t === 'start');
+assert.equal(ws1.you, -1); assert.equal(ws1.spectator, true);
+await cc.next((m) => m.t === 's'); // spectators receive snapshots
+cc.send({ t: 'p', x: 1, y: 1 }); cc.send({ t: 'serve' }); // spectators can't control anything
+cc.send({ t: 'voice_join' });
+const vp1 = await cc.next((m) => m.t === 'voice_peers'); assert.deepEqual(vp1.peers, []);
+cd.send({ t: 'watch', gid: ra.gid }); await cd.next((m) => m.t === 'start');
+cd.send({ t: 'voice_join' });
+const vp2 = await cd.next((m) => m.t === 'voice_peers'); assert.deepEqual(vp2.peers.map((p) => p.username), ['carol']);
+assert.equal((await cc.next((m) => m.t === 'voice_joined')).username, 'dave');
+cd.send({ t: 'rtc', to: c.user.id, data: { sdp: { type: 'offer', sdp: 'x' } } });
+assert.equal((await cc.next((m) => m.t === 'rtc')).from, d.user.id);
+cb.send({ t: 'rtc', to: c.user.id, data: { c: 1 } }); // bob isn't in voice: relay refused
+cb.send({ t: 'voice_join' }); const vp3 = await cb.next((m) => m.t === 'voice_peers'); assert.equal(vp3.peers.length, 2, 'players can join the same room');
+cd.send({ t: 'unwatch' }); await cd.next((m) => m.t === 'unwatched');
+assert.equal((await cc.next((m) => m.t === 'voice_left' && m.uid === d.user.id)).uid, d.user.id);
+cd.send({ t: 'voice_join' }); assert.equal((await cd.next((m) => m.t === 'err')).msg, 'Join a game or watch one first');
+ca.send({ t: 'leave' });
+const sov = await cc.next((m) => m.t === 'over'); assert.equal(sov.you, -1);
+await cc.next((m) => m.t === 'voice_closed');
+await Promise.all([ca.next((m) => m.t === 'over'), cb.next((m) => m.t === 'over')]);
+cc.msgs.length = cd.msgs.length = 0;
+
 // competition: 4 players, auto-start when full, play through
 let comp = (await api('/competitions', a.token, { name: 'Test Cup', size: 4 })).body;
 assert.equal(comp.status, 'open');
@@ -96,6 +124,37 @@ await api(`/competitions/${c2.id}/join`, b.token, {}); await api(`/competitions/
 const started = (await api(`/competitions/${c2.id}/start`, a.token, {})).body;
 assert.equal(started.status, 'running'); assert.equal(started.rounds.length, 2);
 assert.equal(started.rounds[0].filter((m) => m.bye).length, 1);
+
+// in-game chat + host mute (host = competition creator)
+const cc3 = (await api('/competitions', a.token, { name: 'Chat Cup', size: 4 })).body;
+await api(`/competitions/${cc3.id}/join`, b.token, {});
+const started3 = (await api(`/competitions/${cc3.id}/start`, a.token, {})).body;
+const m3 = started3.rounds[0].find((m) => m.p1 && m.p2);
+const [x3, y3] = [clients[m3.p1.username], clients[m3.p2.username]];
+x3.send({ t: 'comp_ready', matchId: m3.id }); y3.send({ t: 'comp_ready', matchId: m3.id });
+const [st1] = await Promise.all([x3.next((q) => q.t === 'start'), y3.next((q) => q.t === 'start')]);
+const hostIsPlayer = [m3.p1.username, m3.p2.username].includes('alice');
+assert.equal(st1.host, m3.p1.username === 'alice');
+cc.send({ t: 'watch', gid: st1.gid }); const wst = await cc.next((q) => q.t === 'start'); assert.equal(wst.host, false); assert.equal(wst.hasHost, true);
+cc.send({ t: 'chat', text: '  hello   everyone  ' });
+for (const cl of [x3, y3, cc]) assert.equal((await cl.next((q) => q.t === 'chat')).text, 'hello everyone');
+cc.send({ t: 'mute_all', on: true });
+assert.match((await cc.next((q) => q.t === 'err')).msg, /Only the competition host/);
+const host = clients.alice;
+host.send({ t: 'mute_all', on: true });
+for (const cl of [x3, y3, cc]) assert.equal((await cl.next((q) => q.t === 'muted')).on, true);
+cc.send({ t: 'chat', text: 'can anyone hear me' });
+assert.equal((await cc.next((q) => q.t === 'err')).msg, 'Chat is muted by the host');
+host.send({ t: 'chat', text: 'host can still talk' });
+assert.equal((await cc.next((q) => q.t === 'chat')).host, true);
+host.send({ t: 'mute_all', on: false });
+await cc.next((q) => q.t === 'muted');
+cc.send({ t: 'chat', text: 'back' }); assert.equal((await cc.next((q) => q.t === 'chat')).text, 'back');
+for (let i = 0; i < 8; i++) cc.send({ t: 'chat', text: 'spam' + i });
+assert.equal((await cc.next((q) => q.t === 'err')).msg, 'Slow down a little');
+y3.send({ t: 'leave' }); await Promise.all([x3.next((q) => q.t === 'over'), y3.next((q) => q.t === 'over'), cc.next((q) => q.t === 'over')]);
+// ranked games have no host
+ca.msgs.length = cb.msgs.length = 0;
 
 console.log('e2e ok');
 done(0);

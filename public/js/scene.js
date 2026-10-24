@@ -126,6 +126,7 @@ export class Scene {
   setMode(mode, idx = 0) {
     this.mode = mode; this.idx = idx;
     this.canvas.style.touchAction = mode === 'game' ? 'none' : 'auto';
+    if (mode === 'watch') this.idx = -1;
   }
 
   /** Mouse/touch -> player-local paddle coords by intersecting the paddle plane. */
@@ -158,11 +159,17 @@ export class Scene {
   frame(now) {
     const dt = Math.max(0, Math.min(0.05, (now - this.last) / 1000)); this.last = now; this.t += dt;
     const cam = this.camera;
-    if (this.mode === 'game') {
+    if (this.mode === 'game' || this.mode === 'watch') {
       const sgn = this.idx === 0 ? 1 : -1;
       const bx = this.ball.position.x;
-      cam.position.set(bx * 0.18, 1.0 + 0.35 * this.portrait, sgn * (3.25 + 1.75 * this.portrait));
-      cam.lookAt(bx * 0.1, -0.12, -sgn * 0.35);
+      if (this.mode === 'watch') { // audience: stand to the side of the table and drift gently
+        const a = 0.55 + Math.sin(this.t * 0.2) * 0.12, d = 3.9 + 1.6 * this.portrait;
+        cam.position.set(Math.sin(a) * d, 1.55 + 0.3 * this.portrait, Math.cos(a) * d);
+        cam.lookAt(0, -0.1, 0);
+      } else {
+        cam.position.set(bx * 0.18, 1.0 + 0.35 * this.portrait, sgn * (3.25 + 1.75 * this.portrait));
+        cam.lookAt(bx * 0.1, -0.12, -sgn * 0.35);
+      }
       const k = 1 - Math.exp(-dt * 55);
       this.ball.position.lerp(this.ballTarget, k);
       for (const p of [0, 1]) {

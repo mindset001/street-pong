@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { q } from './db.js';
 import { router as authRouter, requireAuth, publicUser } from './auth.js';
 import { router as compRouter } from './competitions.js';
-import { attach, stats } from './lobby.js';
+import { attach, stats, liveGames } from './lobby.js';
 
 const app = express();
 app.disable('x-powered-by');
@@ -14,7 +14,8 @@ app.use((req, res, next) => {
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
     'Referrer-Policy': 'no-referrer',
-    'Content-Security-Policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; script-src 'self'",
+    'Permissions-Policy': 'microphone=(self), camera=(), geolocation=()',
+    'Content-Security-Policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; media-src 'self' blob:; script-src 'self'",
   });
   next();
 });
@@ -22,6 +23,7 @@ app.use((req, res, next) => {
 app.use('/api/auth', authRouter);
 app.use('/api/competitions', compRouter);
 
+app.get('/api/live', requireAuth, (req, res) => res.json({ games: liveGames() }));
 app.get('/api/stats', (req, res) => res.json(stats()));
 
 app.get('/api/leaderboard', (req, res) => {

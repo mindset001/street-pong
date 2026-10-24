@@ -13,7 +13,7 @@ function newCode() {
 for (const r of q.all('SELECT id FROM competitions WHERE invite_code IS NULL')) q.run('UPDATE competitions SET invite_code = ? WHERE id = ?', newCode(), r.id);
 
 export const router = Router();
-const hooks = { changed: () => {}, matchReady: () => {}, readyUsers: () => [] };
+const hooks = { changed: () => {}, matchReady: () => {}, readyUsers: () => [], liveGid: () => null };
 export const setHooks = (h) => Object.assign(hooks, h);
 
 export const SIZES = [4, 8, 16];
@@ -34,6 +34,7 @@ export function details(id, meId) {
     (rounds[m.round - 1] ??= []).push({
       id: m.id, slot: m.slot, status: m.status, p1: m.p1 && { id: m.p1, username: m.n1 }, p2: m.p2 && { id: m.p2, username: m.n2 },
       winner: m.winner, s1: m.s1, s2: m.s2, bye: m.status === 'done' && m.s1 === null,
+      gid: m.status === 'playing' ? hooks.liveGid(m.id) : null,
       ready: m.status === 'ready' ? hooks.readyUsers(m.id) : [],
       readyDeadline: m.status === 'ready' ? m.ready_at + READY_TIMEOUT : null,
     });

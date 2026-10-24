@@ -14,6 +14,12 @@ const sessions = new Map();  // gameId -> session
 const inGame = new Map();    // userId -> session
 const queue = [];            // userIds waiting for a ranked game
 const ready = new Map();     // compMatchId -> Set<userId>
+const watching = new Map();  // userId -> session they are spectating
+const MAX_SPECTATORS = 50, MAX_VOICE = 8;
+const ICE = (() => { try { return JSON.parse(process.env.ICE_SERVERS); } catch { return [{ urls: 'stun:stun.l.google.com:19302' }]; } })();
+const CHAT_MAX = 200, CHAT_HISTORY = 50;
+const members = (s) => [...s.humans.filter(Boolean), ...s.spectators];
+const roomOf = (uid) => inGame.get(uid) || watching.get(uid);
 let nextId = 1;
 
 const send = (ws, msg) => { if (ws?.readyState === 1) ws.send(JSON.stringify(msg)); };
@@ -24,6 +30,7 @@ const userRow = (id) => q.get('SELECT id, username, rating FROM users WHERE id =
 comps.setHooks({
   changed: (id) => broadcast({ t: 'comp', id }),
   readyUsers: (mid) => [...(ready.get(mid) || [])],
+  liveGid: (mid) => [...sessions.values()].find((x) => x.compMatch?.id === mid)?.id ?? null,
   matchReady: (m) => {
     const c = q.get('SELECT name FROM competitions WHERE id = ?', m.competition_id);
     for (const uid of [m.p1, m.p2]) sendUser(uid, { t: 'comp_match', compId: m.competition_id, matchId: m.id, name: c?.name });
@@ -37,19 +44,22 @@ function startSession({ kind, humans, ai, compMatch }) {
   const s = {
     id: nextId++, kind, game, humans, compMatch,
     ai: humans.map((h, i) => (h ? null : new AI(game, i, ai))),
-    aiLevel: ai, away: [null, null], acc: 0, last: performance.now(),
+    aiLevel: ai, away: [null, null], spectators: new Set(), voice: new Map(),
+    // The competition's creator moderates the room (can mute everyone else). Quick matches have no host.
+    hostId: compMatch ? q.get('SELECT creator_id FROM competitions WHERE id = ?', compMatch.compId)?.creator_id ?? null : null,
+    muted: false, chat: [], chatTimes: new Map(),
   };
   s.users = humans.map((h) => (h ? userRow(h) : null));
   sessions.set(s.id, s);
-  humans.forEach((h) => { if (h) { inGame.set(h, s); const i = queue.indexOf(h); if (i >= 0) queue.splice(i, 1); } });
+  humans.forEach((h) => { if (h) { leaveWatch(h); inGame.set(h, s); const i = queue.indexOf(h); if (i >= 0) queue.splice(i, 1); } });
   humans.forEach((h, i) => h && sendStart(s, i));
   return s;
 }
 
-function sendStart(s, idx, resume = false) {
+function sendStart(s, idx, resume = false, to = s.humans[idx]) {
   const players = s.users.map((u, i) => (u ? { username: u.username, rating: u.rating } : { username: `CPU (${s.aiLevel})`, rating: null }));
-  sendUser(s.humans[idx], {
-    t: 'start', gid: s.id, you: idx, kind: s.kind, target: TARGET, players, resume, score: s.game.score,
+  sendUser(to, {
+    t: 'start', gid: s.id, you: idx, spectator: idx < 0, host: s.hostId === to, hasHost: s.hostId !== null, muted: s.muted, chat: s.chat, kind: s.kind, target: TARGET, players, resume, score: s.game.score,
     comp: s.compMatch ? { id: s.compMatch.compId, matchId: s.compMatch.id } : null,
   });
 }
@@ -69,6 +79,12 @@ function finish(s, winnerIdx, forfeit = false) {
     Object.assign(res, { d1: recorded.d1, d2: recorded.d2 });
     if (s.compMatch) { ready.delete(s.compMatch.id); comps.reportResult(s.compMatch.id, wId, a, b); }
   }
+  for (const v of s.voice.keys()) sendUser(v, { t: 'voice_closed' });
+  for (const w of s.spectators) {
+    watching.delete(w);
+    sendUser(w, { t: 'over', gid: s.id, kind: s.kind, winner: winnerIdx, you: -1, score: [a, b], forfeit, comp: s.compMatch ? { id: s.compMatch.compId } : null });
+  }
+  s.spectators.clear(); s.voice.clear();
   s.humans.forEach((h, i) => {
     if (!h) return;
     inGame.delete(h);
@@ -79,6 +95,25 @@ function finish(s, winnerIdx, forfeit = false) {
     });
   });
   broadcastLobby();
+}
+
+function leaveWatch(uid) {
+  const s = watching.get(uid);
+  if (!s) return;
+  s.spectators.delete(uid); watching.delete(uid);
+  voiceLeave(uid, s);
+}
+function voiceLeave(uid, s) {
+  if (!s?.voice.delete(uid)) return;
+  for (const v of s.voice.keys()) sendUser(v, { t: 'voice_left', uid });
+}
+
+export function liveGames() {
+  return [...sessions.values()].map((s) => ({
+    gid: s.id, kind: s.kind, players: s.users.map((u) => u?.username ?? `CPU (${s.aiLevel})`), score: s.game.score,
+    spectators: s.spectators.size, voice: s.voice.size,
+    competition: s.compMatch ? q.get('SELECT name FROM competitions WHERE id = ?', s.compMatch.compId)?.name : null,
+  })).filter((g) => g.kind !== 'ai');
 }
 
 function tryMatchmake() {
@@ -106,7 +141,60 @@ function handle(ws, state, msg) {
       if (s && s.game.server === s.humans.indexOf(uid)) s.game.serve();
       break;
     }
+    case 'watch': {
+      if (s) return send(ws, { t: 'err', msg: 'Finish your current game first' });
+      const target = sessions.get(Number(msg.gid));
+      if (!target) return send(ws, { t: 'err', msg: 'That game has ended' });
+      if (watching.get(uid) !== target) {
+        if (target.spectators.size >= MAX_SPECTATORS) return send(ws, { t: 'err', msg: 'The audience is full' });
+        leaveWatch(uid);
+        target.spectators.add(uid); watching.set(uid, target);
+      }
+      const i = queue.indexOf(uid); if (i >= 0) queue.splice(i, 1);
+      sendStart(target, -1, false, uid);
+      break;
+    }
+    case 'unwatch': { leaveWatch(uid); send(ws, { t: 'unwatched' }); break; }
+    case 'voice_join': {
+      const room = roomOf(uid);
+      if (!room) return send(ws, { t: 'err', msg: 'Join a game or watch one first' });
+      if (!room.voice.has(uid) && room.voice.size >= MAX_VOICE) return send(ws, { t: 'err', msg: 'The voice room is full' });
+      const peers = [...room.voice].filter(([id]) => id !== uid).map(([id, username]) => ({ uid: id, username }));
+      room.voice.set(uid, state.user.username);
+      send(ws, { t: 'voice_peers', peers, ice: ICE, me: uid });
+      for (const p of peers) sendUser(p.uid, { t: 'voice_joined', uid, username: state.user.username });
+      break;
+    }
+    case 'chat': {
+      const room = roomOf(uid);
+      if (!room) return;
+      const text = typeof msg.text === 'string' ? msg.text.replace(/\s+/g, ' ').trim().slice(0, CHAT_MAX) : '';
+      if (!text) return;
+      if (room.muted && uid !== room.hostId) return send(ws, { t: 'err', msg: 'Chat is muted by the host' });
+      const t = Date.now(), recent = (room.chatTimes.get(uid) || []).filter((x) => t - x < 5000);
+      if (recent.length >= 5) return send(ws, { t: 'err', msg: 'Slow down a little' });
+      recent.push(t); room.chatTimes.set(uid, recent);
+      const m = { t: 'chat', uid, name: state.user.username, text, at: t, host: uid === room.hostId };
+      room.chat.push(m); if (room.chat.length > CHAT_HISTORY) room.chat.shift();
+      const out = JSON.stringify(m);
+      for (const id of members(room)) clients.get(id)?.ws.send(out);
+      break;
+    }
+    case 'mute_all': {
+      const room = roomOf(uid);
+      if (!room || room.hostId !== uid) return send(ws, { t: 'err', msg: 'Only the competition host can do that' });
+      room.muted = !!msg.on;
+      for (const id of members(room)) sendUser(id, { t: 'muted', on: room.muted, by: state.user.username, host: id === room.hostId });
+      break;
+    }
+    case 'voice_leave': { voiceLeave(uid, roomOf(uid)); break; }
+    case 'rtc': { // relay WebRTC signalling between members of the same voice room
+      const room = roomOf(uid), to = Number(msg.to);
+      if (room?.voice.has(uid) && room.voice.has(to) && msg.data && typeof msg.data === 'object') sendUser(to, { t: 'rtc', from: uid, data: msg.data });
+      break;
+    }
     case 'queue': {
+      leaveWatch(uid);
       if (s) return send(ws, { t: 'err', msg: 'Finish your current game first' });
       if (!queue.includes(uid)) queue.push(uid);
       send(ws, { t: 'queued' });
@@ -119,6 +207,7 @@ function handle(ws, state, msg) {
       break;
     }
     case 'ai': {
+      leaveWatch(uid);
       if (s) return send(ws, { t: 'err', msg: 'Finish your current game first' });
       const level = LEVELS[msg.level] ? msg.level : 'medium';
       const i = queue.indexOf(uid); if (i >= 0) queue.splice(i, 1);
@@ -131,6 +220,7 @@ function handle(ws, state, msg) {
       break;
     }
     case 'comp_ready': {
+      leaveWatch(uid);
       if (s) return send(ws, { t: 'err', msg: 'Finish your current game first' });
       const m = q.get("SELECT * FROM competition_matches WHERE id = ? AND status = 'ready'", Number(msg.matchId));
       if (!m || (m.p1 !== uid && m.p2 !== uid)) return send(ws, { t: 'err', msg: 'That match is not available' });
@@ -152,7 +242,7 @@ function handle(ws, state, msg) {
 }
 
 export function attach(server) {
-  const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 1024 });
+  const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 16384 });
   wss.on('connection', (ws) => {
     let state = null;
     const timer = setTimeout(() => !state && ws.close(4001, 'auth timeout'), 5000);
@@ -184,7 +274,9 @@ export function attach(server) {
       clients.delete(uid);
       const qi = queue.indexOf(uid); if (qi >= 0) queue.splice(qi, 1);
       for (const set of ready.values()) set.delete(uid);
+      leaveWatch(uid);
       const s = inGame.get(uid);
+      voiceLeave(uid, s);
       if (s) s.away[s.humans.indexOf(uid)] = Date.now() + RECONNECT_MS;
       broadcastLobby();
     });
@@ -204,7 +296,7 @@ export function attach(server) {
       }
       const snap = s.game.snapshot();
       const m = JSON.stringify(snap);
-      s.humans.forEach((h) => h && clients.get(h)?.ws.readyState === 1 && clients.get(h).ws.send(m));
+      for (const h of [...s.humans, ...s.spectators]) if (h && clients.get(h)?.ws.readyState === 1) clients.get(h).ws.send(m);
       if (s.game.over) finish(s, s.game.winner);
     }
   }, 1000 / 60);
