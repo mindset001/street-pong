@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { WebSocket } from 'ws';
+import { TEST_URI, dropTestDb } from './helpers.js';
 
 const PORT = 3100 + Math.floor(Math.random() * 500);
 const base = `http://localhost:${PORT}`;
-const srv = spawn('node', ['server/index.js'], { env: { ...process.env, PORT, DB_FILE: ':memory:', JWT_SECRET: 'test' }, stdio: 'pipe' });
-const done = (code) => { srv.kill(); process.exit(code); };
+const srv = spawn('node', ['src/index.js'], { env: { ...process.env, PORT, MONGODB_URI: TEST_URI, JWT_SECRET: 'test' }, stdio: 'pipe' });
+const done = async (code) => { srv.kill(); await dropTestDb().catch(() => {}); process.exit(code); };
 process.on('uncaughtException', (e) => { console.error(e); done(1); });
 await new Promise((r) => srv.stdout.on('data', (d) => String(d).includes('running') && r()));
 

@@ -1,4 +1,4 @@
-import * as THREE from '/vendor/three/three.module.js';
+import * as THREE from '../vendor/three/three.module.js';
 
 // Must match server/physics.js
 export const W = { HALF_L: 1.37, HALF_W: 0.7625, NET_H: 0.1525, PLANE: 1.72, FLOOR: -0.76, X_LIM: 1.3, Y_MIN: -0.3, Y_MAX: 0.8 };

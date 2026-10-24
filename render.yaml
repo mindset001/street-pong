@@ -1,0 +1,18 @@
+# Render blueprint: backend only (deploy the frontend folder to any static host, e.g. Netlify/Vercel/Cloudflare Pages).
+services:
+  - type: web
+    name: street-pong-api
+    runtime: node
+    rootDir: backend
+    buildCommand: npm ci --omit=dev
+    startCommand: node src/index.js
+    healthCheckPath: /health
+    envVars:
+      - key: MONGODB_URI
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CORS_ORIGIN
+        sync: false          # e.g. https://your-frontend.netlify.app
+      - key: TRUST_PROXY
+        value: "1"

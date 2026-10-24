@@ -1,12 +1,12 @@
 {
-  "name": "street-pong",
+  "name": "street-pong-backend",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "3D multiplayer table tennis with accounts, competitions and a leaderboard",
+  "description": "Street Pong API + realtime game server (Express, WebSocket, MongoDB)",
   "scripts": {
-    "start": "node server/index.js",
-    "dev": "node --watch server/index.js",
+    "start": "node --env-file-if-exists=.env src/index.js",
+    "dev": "node --watch --env-file-if-exists=.env src/index.js",
     "test": "node test/sim.test.js && node test/e2e.test.js",
     "test:ui": "node test/ui.test.js",
     "test:voice": "node test/voice.test.js"
@@ -15,7 +15,10 @@
     "bcryptjs": "^3.0.3",
     "express": "^5.3.0",
     "jsonwebtoken": "^9.0.3",
-    "three": "^0.186.1",
+    "mongodb": "^7.7.0",
     "ws": "^8.22.0"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

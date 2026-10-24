@@ -2,7 +2,7 @@ import { WebSocketServer } from 'ws';
 import { Game, C } from './physics.js';
 import { AI, LEVELS } from './ai.js';
 import { verify } from './auth.js';
-import { q } from './db.js';
+import { users, competitions, cmatches } from './db.js';
 import { recordMatch } from './ratings.js';
 import * as comps from './competitions.js';
 
@@ -25,35 +25,45 @@ let nextId = 1;
 const send = (ws, msg) => { if (ws?.readyState === 1) ws.send(JSON.stringify(msg)); };
 const sendUser = (uid, msg) => send(clients.get(uid)?.ws, msg);
 const broadcast = (msg) => { const s = JSON.stringify(msg); for (const c of clients.values()) if (c.ws.readyState === 1) c.ws.send(s); };
-const userRow = (id) => q.get('SELECT id, username, rating FROM users WHERE id = ?', id);
+const userRow = async (id) => { const u = await users.findOne({ _id: id }); return u && { id: u._id, username: u.username, rating: u.rating }; };
+const logErr = (e) => console.error(e);
+const starting = new Set();  // users whose game is being set up (DB lookups in flight)
 
 comps.setHooks({
   changed: (id) => broadcast({ t: 'comp', id }),
   readyUsers: (mid) => [...(ready.get(mid) || [])],
   liveGid: (mid) => [...sessions.values()].find((x) => x.compMatch?.id === mid)?.id ?? null,
-  matchReady: (m) => {
-    const c = q.get('SELECT name FROM competitions WHERE id = ?', m.competition_id);
-    for (const uid of [m.p1, m.p2]) sendUser(uid, { t: 'comp_match', compId: m.competition_id, matchId: m.id, name: c?.name });
-    broadcast({ t: 'comp', id: m.competition_id });
+  matchReady: (m, name) => {
+    for (const uid of [m.p1, m.p2]) sendUser(uid, { t: 'comp_match', compId: m.competitionId, matchId: m._id, name });
+    broadcast({ t: 'comp', id: m.competitionId });
   },
 });
 
-function startSession({ kind, humans, ai, compMatch }) {
+async function startSession({ kind, humans, ai, compMatch }) {
   // humans: [userId|null, userId|null]; null seat = AI
-  const game = new Game({ target: TARGET });
-  const s = {
-    id: nextId++, kind, game, humans, compMatch,
-    ai: humans.map((h, i) => (h ? null : new AI(game, i, ai))),
-    aiLevel: ai, away: [null, null], spectators: new Set(), voice: new Map(),
-    // The competition's creator moderates the room (can mute everyone else). Quick matches have no host.
-    hostId: compMatch ? q.get('SELECT creator_id FROM competitions WHERE id = ?', compMatch.compId)?.creator_id ?? null : null,
-    muted: false, chat: [], chatTimes: new Map(),
-  };
-  s.users = humans.map((h) => (h ? userRow(h) : null));
-  sessions.set(s.id, s);
-  humans.forEach((h) => { if (h) { leaveWatch(h); inGame.set(h, s); const i = queue.indexOf(h); if (i >= 0) queue.splice(i, 1); } });
-  humans.forEach((h, i) => h && sendStart(s, i));
-  return s;
+  humans.forEach((h) => h && starting.add(h));
+  try {
+    const [seatUsers, comp] = await Promise.all([
+      Promise.all(humans.map((h) => (h ? userRow(h) : null))),
+      compMatch ? competitions.findOne({ _id: compMatch.compId }, { projection: { name: 1, creatorId: 1 } }) : null,
+    ]);
+    const game = new Game({ target: TARGET });
+    const s = {
+      id: nextId++, kind, game, humans, compMatch, users: seatUsers, compName: comp?.name ?? null,
+      ai: humans.map((h, i) => (h ? null : new AI(game, i, ai))),
+      aiLevel: ai, away: [null, null], spectators: new Set(), voice: new Map(),
+      // The competition's creator moderates the room (can mute everyone else). Quick matches have no host.
+      hostId: comp?.creatorId ?? null,
+      muted: false, chat: [], chatTimes: new Map(),
+    };
+    sessions.set(s.id, s);
+    humans.forEach((h) => { if (h) { leaveWatch(h); inGame.set(h, s); const i = queue.indexOf(h); if (i >= 0) queue.splice(i, 1); } });
+    humans.forEach((h, i) => h && sendStart(s, i));
+    broadcastLobby();
+    return s;
+  } finally {
+    humans.forEach((h) => h && starting.delete(h));
+  }
 }
 
 function sendStart(s, idx, resume = false, to = s.humans[idx]) {
@@ -64,34 +74,39 @@ function sendStart(s, idx, resume = false, to = s.humans[idx]) {
   });
 }
 
-function finish(s, winnerIdx, forfeit = false) {
+async function finish(s, winnerIdx, forfeit = false) {
   if (!sessions.delete(s.id)) return;
-  const [a, b] = s.game.score;
-  const [u1, u2] = s.users;
-  const res = { d1: 0, d2: 0 };
-  let recorded = null;
-  const wId = winnerIdx === null ? null : s.users[winnerIdx]?.id ?? null;
-  if (s.kind === 'ai') {
-    // Only completed games vs the CPU are logged (no rating change).
-    if (!forfeit && u1) recorded = recordMatch({ p1: u1.id, p2: null, s1: a, s2: b, winner: winnerIdx === 0 ? u1.id : null, kind: 'ai' });
-  } else {
-    recorded = recordMatch({ p1: u1.id, p2: u2.id, s1: a, s2: b, winner: wId, kind: s.kind });
-    Object.assign(res, { d1: recorded.d1, d2: recorded.d2 });
-    if (s.compMatch) { ready.delete(s.compMatch.id); comps.reportResult(s.compMatch.id, wId, a, b); }
-  }
+  // Release everyone synchronously so no new message sees a half-finished game; DB work follows.
   for (const v of s.voice.keys()) sendUser(v, { t: 'voice_closed' });
-  for (const w of s.spectators) {
+  const [a, b] = s.game.score;
+  const spectators = [...s.spectators];
+  for (const w of spectators) {
     watching.delete(w);
     sendUser(w, { t: 'over', gid: s.id, kind: s.kind, winner: winnerIdx, you: -1, score: [a, b], forfeit, comp: s.compMatch ? { id: s.compMatch.compId } : null });
   }
   s.spectators.clear(); s.voice.clear();
+  s.humans.forEach((h) => h && inGame.delete(h));
+  if (s.compMatch) ready.delete(s.compMatch.id);
+
+  const [u1, u2] = s.users;
+  const res = { d1: 0, d2: 0 };
+  const wId = winnerIdx === null ? null : s.users[winnerIdx]?.id ?? null;
+  try {
+    if (s.kind === 'ai') {
+      // Only completed games vs the CPU are logged (no rating change).
+      if (!forfeit && u1) await recordMatch({ p1: u1.id, p2: null, s1: a, s2: b, winner: winnerIdx === 0 ? u1.id : null, kind: 'ai' });
+    } else {
+      const rec = await recordMatch({ p1: u1.id, p2: u2.id, s1: a, s2: b, winner: wId, kind: s.kind });
+      Object.assign(res, { d1: rec.d1, d2: rec.d2 });
+      if (s.compMatch) await comps.reportResult(s.compMatch.id, wId, a, b);
+    }
+  } catch (e) { logErr(e); }
+  const fresh = await Promise.all(s.humans.map((h) => (h ? userRow(h) : null))).catch(() => []);
   s.humans.forEach((h, i) => {
     if (!h) return;
-    inGame.delete(h);
-    const fresh = userRow(h);
     sendUser(h, {
       t: 'over', gid: s.id, kind: s.kind, winner: winnerIdx, you: i, score: [a, b], forfeit,
-      rating: fresh.rating, delta: i === 0 ? res.d1 : res.d2, comp: s.compMatch ? { id: s.compMatch.compId } : null,
+      rating: fresh[i]?.rating ?? s.users[i].rating, delta: i === 0 ? res.d1 : res.d2, comp: s.compMatch ? { id: s.compMatch.compId } : null,
     });
   });
   broadcastLobby();
@@ -112,7 +127,7 @@ export function liveGames() {
   return [...sessions.values()].map((s) => ({
     gid: s.id, kind: s.kind, players: s.users.map((u) => u?.username ?? `CPU (${s.aiLevel})`), score: s.game.score,
     spectators: s.spectators.size, voice: s.voice.size,
-    competition: s.compMatch ? q.get('SELECT name FROM competitions WHERE id = ?', s.compMatch.compId)?.name : null,
+    competition: s.compName,
   })).filter((g) => g.kind !== 'ai');
 }
 
@@ -120,7 +135,7 @@ function tryMatchmake() {
   while (queue.length >= 2) {
     const [a, b] = queue.splice(0, 2);
     const players = Math.random() < 0.5 ? [a, b] : [b, a];
-    startSession({ kind: 'ranked', humans: players });
+    startSession({ kind: 'ranked', humans: players }).catch(logErr);
   }
   broadcastLobby();
 }
@@ -129,7 +144,7 @@ function broadcastLobby() {
   broadcast({ t: 'lobby', online: clients.size, playing: sessions.size, queued: queue.length });
 }
 
-function handle(ws, state, msg) {
+async function handle(ws, state, msg) {
   const uid = state.user.id;
   const s = inGame.get(uid);
   switch (msg.t) {
@@ -195,7 +210,7 @@ function handle(ws, state, msg) {
     }
     case 'queue': {
       leaveWatch(uid);
-      if (s) return send(ws, { t: 'err', msg: 'Finish your current game first' });
+      if (s || starting.has(uid)) return send(ws, { t: 'err', msg: 'Finish your current game first' });
       if (!queue.includes(uid)) queue.push(uid);
       send(ws, { t: 'queued' });
       tryMatchmake();
@@ -208,63 +223,66 @@ function handle(ws, state, msg) {
     }
     case 'ai': {
       leaveWatch(uid);
-      if (s) return send(ws, { t: 'err', msg: 'Finish your current game first' });
+      if (s || starting.has(uid)) return send(ws, { t: 'err', msg: 'Finish your current game first' });
       const level = LEVELS[msg.level] ? msg.level : 'medium';
       const i = queue.indexOf(uid); if (i >= 0) queue.splice(i, 1);
-      startSession({ kind: 'ai', humans: [uid, null], ai: level });
-      broadcastLobby();
+      await startSession({ kind: 'ai', humans: [uid, null], ai: level });
       break;
     }
     case 'leave': {
-      if (s) finish(s, 1 - s.humans.indexOf(uid), true);
+      if (s) await finish(s, 1 - s.humans.indexOf(uid), true);
       break;
     }
     case 'comp_ready': {
       leaveWatch(uid);
-      if (s) return send(ws, { t: 'err', msg: 'Finish your current game first' });
-      const m = q.get("SELECT * FROM competition_matches WHERE id = ? AND status = 'ready'", Number(msg.matchId));
+      if (s || starting.has(uid)) return send(ws, { t: 'err', msg: 'Finish your current game first' });
+      const m = await cmatches.findOne({ _id: Number(msg.matchId), status: 'ready' });
       if (!m || (m.p1 !== uid && m.p2 !== uid)) return send(ws, { t: 'err', msg: 'That match is not available' });
-      const set = ready.get(m.id) || ready.set(m.id, new Set()).get(m.id);
+      const set = ready.get(m._id) || ready.set(m._id, new Set()).get(m._id);
       set.add(uid);
       if (set.has(m.p1) && set.has(m.p2) && clients.has(m.p1) && clients.has(m.p2) && !inGame.has(m.p1) && !inGame.has(m.p2)) {
-        comps.setPlaying(m.id);
-        startSession({ kind: 'competition', humans: [m.p1, m.p2], compMatch: { id: m.id, compId: m.competition_id } });
-        broadcastLobby();
-      } else broadcast({ t: 'comp', id: m.competition_id });
+        if (await comps.setPlaying(m._id)) await startSession({ kind: 'competition', humans: [m.p1, m.p2], compMatch: { id: m._id, compId: m.competitionId } });
+      } else broadcast({ t: 'comp', id: m.competitionId });
       break;
     }
     case 'comp_unready': {
       const set = ready.get(Number(msg.matchId));
-      if (set && !inGame.has(uid)) { set.delete(uid); const m = q.get('SELECT competition_id FROM competition_matches WHERE id = ?', Number(msg.matchId)); if (m) broadcast({ t: 'comp', id: m.competition_id }); }
+      if (set && !inGame.has(uid)) { set.delete(uid); const m = await cmatches.findOne({ _id: Number(msg.matchId) }, { projection: { competitionId: 1 } }); if (m) broadcast({ t: 'comp', id: m.competitionId }); }
       break;
     }
   }
 }
 
-export function attach(server) {
-  const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 16384 });
+export function attach(server, origins = []) {
+  // Browsers always send Origin on WebSocket upgrades. If a frontend origin list is configured, only accept those
+  // (or same-host pages); non-browser clients without an Origin header are fine since auth is token-based anyway.
+  const verifyClient = ({ origin, req }) => !origin || !origins.length || origins.includes('*') || origins.includes(origin) || new URL(origin).host === req.headers.host;
+  const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 16384, verifyClient });
   wss.on('connection', (ws) => {
-    let state = null;
+    let state = null, authing = false;
     const timer = setTimeout(() => !state && ws.close(4001, 'auth timeout'), 5000);
+    async function authenticate(token) {
+      const user = await verify(String(token));
+      if (!user) { send(ws, { t: 'authfail' }); return ws.close(4002, 'bad token'); }
+      if (ws.readyState !== 1) return;
+      clearTimeout(timer);
+      state = { user };
+      const prev = clients.get(user.id);
+      clients.set(user.id, { ws, user });
+      if (prev && prev.ws !== ws) { send(prev.ws, { t: 'err', msg: 'Signed in from another tab' }); prev.ws.close(4003, 'replaced'); }
+      send(ws, { t: 'hello', user, online: clients.size, playing: sessions.size, queued: queue.length });
+      const s = inGame.get(user.id);
+      if (s) { const i = s.humans.indexOf(user.id); s.away[i] = null; sendStart(s, i, true); }
+      broadcastLobby();
+    }
     ws.on('message', (data) => {
       let msg; try { msg = JSON.parse(data); } catch { return; }
       if (!msg || typeof msg.t !== 'string') return;
       if (!state) {
-        if (msg.t !== 'auth') return;
-        const user = verify(String(msg.token));
-        if (!user) { send(ws, { t: 'authfail' }); return ws.close(4002, 'bad token'); }
-        clearTimeout(timer);
-        state = { user };
-        const prev = clients.get(user.id);
-        clients.set(user.id, { ws, user });
-        if (prev && prev.ws !== ws) { send(prev.ws, { t: 'err', msg: 'Signed in from another tab' }); prev.ws.close(4003, 'replaced'); }
-        send(ws, { t: 'hello', user, ...{ online: clients.size, playing: sessions.size, queued: queue.length } });
-        const s = inGame.get(user.id);
-        if (s) { const i = s.humans.indexOf(user.id); s.away[i] = null; sendStart(s, i, true); }
-        broadcastLobby();
+        if (msg.t === 'auth' && !authing) { authing = true; authenticate(msg.token).catch(logErr); }
         return;
       }
-      handle(ws, state, msg);
+      handle(ws, state, msg).catch(logErr);
     });
     ws.on('close', () => {
       clearTimeout(timer);
@@ -288,7 +306,7 @@ export function attach(server) {
     const t = Date.now();
     for (const s of [...sessions.values()]) {
       const gone = s.away.findIndex((d) => d && t > d);
-      if (gone >= 0) { finish(s, 1 - gone, true); continue; }
+      if (gone >= 0) { finish(s, 1 - gone, true).catch(logErr); continue; }
       if (s.away.some(Boolean)) continue; // paused while someone reconnects
       for (let i = 0; i < 2; i++) {
         s.ai.forEach((a) => a?.update(C.DT));
@@ -297,12 +315,12 @@ export function attach(server) {
       const snap = s.game.snapshot();
       const m = JSON.stringify(snap);
       for (const h of [...s.humans, ...s.spectators]) if (h && clients.get(h)?.ws.readyState === 1) clients.get(h).ws.send(m);
-      if (s.game.over) finish(s, s.game.winner);
+      if (s.game.over) finish(s, s.game.winner).catch(logErr);
     }
   }, 1000 / 60);
 
-  setInterval(() => comps.sweepWalkovers(), 10_000);
-  comps.recoverPlaying();
+  setInterval(() => comps.sweepWalkovers().catch(logErr), 10_000);
+  comps.recoverPlaying().catch(logErr);
   return wss;
 }
 

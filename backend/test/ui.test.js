@@ -1,14 +1,15 @@
 // Drives the real UI in headless Chrome over CDP: sign up, play vs CPU, create a competition, view leaderboard.
 import { spawn } from 'node:child_process';
 import { WebSocket } from 'ws';
+import { TEST_URI, dropTestDb } from './helpers.js';
 import assert from 'node:assert/strict';
 
 const CHROME = process.env.CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const PORT = 3600 + Math.floor(Math.random() * 300), DBG = 9300 + Math.floor(Math.random() * 300);
-const srv = spawn('node', ['server/index.js'], { env: { ...process.env, PORT, DB_FILE: ':memory:', JWT_SECRET: 't' }, stdio: 'pipe' });
+const srv = spawn('node', ['src/index.js'], { env: { ...process.env, PORT, MONGODB_URI: TEST_URI, JWT_SECRET: 't' }, stdio: 'pipe' });
 await new Promise((r) => srv.stdout.on('data', (d) => String(d).includes('running') && r()));
 const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${DBG}`, '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--window-size=1280,720', `--user-data-dir=${process.env.TMPDIR || '/tmp'}/pong-ui-${DBG}`, 'about:blank'], { stdio: 'ignore' });
-const end = (c) => { chrome.kill(); srv.kill(); process.exit(c); };
+const end = async (c) => { chrome.kill(); srv.kill(); await dropTestDb().catch(() => {}); process.exit(c); };
 let tabs;
 for (let i = 0; i < 50 && !tabs; i++) { try { tabs = await (await fetch(`http://localhost:${DBG}/json`)).json(); } catch { await new Promise((r) => setTimeout(r, 200)); } }
 const ws = new WebSocket(tabs.find((t) => t.type === 'page').webSocketDebuggerUrl);

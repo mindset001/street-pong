@@ -1,6 +1,7 @@
 import { Scene } from './scene.js';
 import { sfx } from './audio.js';
 import { Voice } from './voice.js';
+import { API_URL } from './config.js';
 
 // ---------- helpers ----------
 const $ = (s) => document.querySelector(s);
@@ -33,7 +34,7 @@ const S = { token: store.get('token'), user: null, game: null, level: 'medium', 
 const scene = new Scene($('#gl'));
 
 async function api(path, opts = {}) {
-  const res = await fetch(`/api${path}`, {
+  const res = await fetch(`${API_URL}/api${path}`, {
     method: opts.method || (opts.body ? 'POST' : 'GET'),
     headers: { 'Content-Type': 'application/json', ...(S.token ? { Authorization: `Bearer ${S.token}` } : {}) },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
@@ -49,7 +50,8 @@ let ws, retry = 0, wsTimer;
 function connect() {
   clearTimeout(wsTimer);
   if (!S.token) return;
-  ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
+  const base = new URL(API_URL || location.origin);
+  ws = new WebSocket(`${base.protocol === 'https:' ? 'wss' : 'ws'}://${base.host}/ws`);
   ws.onopen = () => ws.send(JSON.stringify({ t: 'auth', token: S.token }));
   ws.onmessage = (e) => { try { onMsg(JSON.parse(e.data)); } catch (err) { console.error(err); } };
   ws.onclose = (e) => {

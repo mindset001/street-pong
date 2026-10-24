@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { Game, C } from '../server/physics.js';
-import { AI } from '../server/ai.js';
+import { Game, C } from '../src/physics.js';
+import { AI } from '../src/ai.js';
 
 function play(l0, l1) {
   const g = new Game({ target: 11 });

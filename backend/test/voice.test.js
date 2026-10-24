@@ -1,14 +1,15 @@
 // Two real Chrome instances (fake microphone) spectate a bot-played game and talk over WebRTC.
 import { spawn } from 'node:child_process';
 import { WebSocket } from 'ws';
+import { TEST_URI, dropTestDb } from './helpers.js';
 import assert from 'node:assert/strict';
 
 const CHROME = process.env.CHROME || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const PORT = 4100 + Math.floor(Math.random() * 300);
-const srv = spawn('node', ['server/index.js'], { env: { ...process.env, PORT, DB_FILE: ':memory:', JWT_SECRET: 't' }, stdio: 'pipe' });
+const srv = spawn('node', ['src/index.js'], { env: { ...process.env, PORT, MONGODB_URI: TEST_URI, JWT_SECRET: 't' }, stdio: 'pipe' });
 await new Promise((r) => srv.stdout.on('data', (d) => String(d).includes('running') && r()));
 const procs = [srv];
-const end = (c) => { procs.forEach((p) => p.kill()); process.exit(c); };
+const end = async (c) => { procs.forEach((p) => p.kill()); await dropTestDb().catch(() => {}); process.exit(c); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const reg = async (u) => (await fetch(`http://localhost:${PORT}/api/auth/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: u, password: 'secret1' }) })).json();
 
