@@ -1,5 +1,12 @@
 import { C, clamp, predictCrossing } from './physics.js';
 
+/** Friendly identities for the CPU opponents (shown instead of "CPU"). */
+export const CPU = {
+  easy:   { name: 'Pixel', avatar: '👾', color: '#3ddc97', paddle: '#16a34a', char: { skin: '#9ae6b4', hairStyle: 'bald', hair: '#1a1410', shirt: '#16a34a', shorts: '#14532d', accessory: 'shades' } },
+  medium: { name: 'Rally', avatar: '🤖', color: '#38d6ff', paddle: '#2563eb', char: { skin: '#a5d8ff', hairStyle: 'short', hair: '#2563eb', shirt: '#38d6ff', shorts: '#1e3a8a', accessory: 'headband' } },
+  hard:   { name: 'Titan', avatar: '🦾', color: '#ff5d73', paddle: '#22262e', char: { skin: '#cbd5e1', hairStyle: 'bald', hair: '#1a1410', shirt: '#111827', shorts: '#7f1d1d', accessory: 'cap' } },
+};
+
 export const LEVELS = {
   easy:   { speed: 1.3, err: 0.2, react: 0.35, power: 0.45, miss: 0.3 },
   medium: { speed: 2.2, err: 0.12, react: 0.18, power: 0.7, miss: 0.15 },

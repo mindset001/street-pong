@@ -41,10 +41,26 @@ await Promise.all([ca, cb, cc, cd].map((x) => x.next((m) => m.t === 'hello')));
 ca.send({ t: 'ai', level: 'easy' });
 const st = await ca.next((m) => m.t === 'start');
 assert.equal(st.kind, 'ai');
+assert.equal(st.players[1].username, 'Pixel'); assert.equal(st.players[1].cpu, true); assert.equal(st.level, 'easy');
+assert.ok(st.players[0].avatar && st.players[0].color && st.players[0].paddle && st.players[0].char?.skin, 'human players carry their look');
+assert.ok(st.players[1].char?.shirt, 'CPU has a character too');
 const snap = await ca.next((m) => m.t === 's');
 assert.equal(snap.st, 'serve');
 ca.send({ t: 'leave' });
 await ca.next((m) => m.t === 'over');
+
+// player customisation: whitelist only
+const opts = (await api('/auth/player-options')).body;
+assert.ok(opts.avatars.length > 8 && opts.colors.length && opts.paddles.length);
+assert.equal((await api('/auth/player', a.token, { avatar: '<script>', color: opts.colors[0], paddle: opts.paddles[0] }, 'PUT')).status, 400);
+assert.equal((await api('/auth/player', a.token, { avatar: opts.avatars[3], color: opts.colors[2], paddle: opts.paddles[4] }, 'PUT')).status, 200);
+const me = (await api('/auth/me', a.token)).body.user;
+assert.deepEqual([me.avatar, me.color, me.paddle], [opts.avatars[3], opts.colors[2], opts.paddles[4]]);
+const ch = Object.fromEntries(Object.entries(opts.char).map(([k, v]) => [k, v[1]]));
+assert.equal((await api('/auth/player', a.token, { avatar: opts.avatars[3], color: opts.colors[2], paddle: opts.paddles[4], char: { ...ch, skin: 'javascript:1' } }, 'PUT')).status, 400);
+assert.equal((await api('/auth/player', a.token, { avatar: opts.avatars[3], color: opts.colors[2], paddle: opts.paddles[4], char: ch }, 'PUT')).status, 200);
+assert.deepEqual((await api('/auth/me', a.token)).body.user.char, ch);
+assert.equal((await api('/auth/player', null, { avatar: opts.avatars[0], color: opts.colors[0], paddle: opts.paddles[0] }, 'PUT')).status, 401);
 
 // ranked quick match + forfeit -> ratings move
 ca.send({ t: 'queue' }); await ca.next((m) => m.t === 'queued');

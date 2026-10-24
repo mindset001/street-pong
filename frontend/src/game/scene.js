@@ -1,4 +1,5 @@
-import * as THREE from '../vendor/three/three.module.js';
+import * as THREE from 'three';
+import { Character } from './character';
 
 // Must match server/physics.js
 export const W = { HALF_L: 1.37, HALF_W: 0.7625, NET_H: 0.1525, PLANE: 1.72, FLOOR: -0.76, X_LIM: 1.3, Y_MIN: -0.3, Y_MAX: 0.8 };
@@ -12,7 +13,7 @@ function canvasTex(w, h, draw, repeat) {
   return t;
 }
 
-function makePaddle(rubber) {
+export function makePaddle(rubber) {
   const g = new THREE.Group();
   const face = new THREE.Mesh(new THREE.CylinderGeometry(0.095, 0.095, 0.014, 32), new THREE.MeshStandardMaterial({ color: rubber, roughness: 0.55, emissive: rubber, emissiveIntensity: 0.22 }));
   face.rotation.x = Math.PI / 2; face.castShadow = true;
@@ -21,6 +22,7 @@ function makePaddle(rubber) {
   const handle = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.1, 0.018), new THREE.MeshStandardMaterial({ color: 0xc89a5e, roughness: 0.8 }));
   handle.position.set(0, -0.145, 0.008); handle.castShadow = true;
   g.add(face, wood, handle);
+  g.userData.rubber = face.material;
   return g;
 }
 
@@ -39,6 +41,7 @@ export class Scene {
     this.ballTarget = new THREE.Vector3(0, 0.3, 0);
     this.padTarget = [new THREE.Vector2(0, 0.2), new THREE.Vector2(0, 0.2)];
     this.mine = new THREE.Vector2(0, 0.2);
+    this.chars = [null, null];
     this.build();
     this.ray = new THREE.Raycaster();
     this.resize(); addEventListener('resize', () => this.resize());
@@ -123,10 +126,29 @@ export class Scene {
     this.camera.updateProjectionMatrix();
   }
 
+  /** Builds a 3D player behind each paddle from the players' saved characters. */
+  setCharacters(specs) {
+    specs.forEach((spec, i) => {
+      if (this.chars[i]) { this.scene.remove(this.chars[i].group); this.chars[i].dispose(); this.chars[i] = null; }
+      if (!spec) return;
+      const c = new Character(spec);
+      c.group.position.set(0, W.FLOOR, (i === 0 ? 1 : -1) * (W.PLANE + 0.5));
+      c.group.rotation.y = i === 0 ? Math.PI : 0; // seat 0 stands at +z and faces the net
+      this.scene.add(c.group);
+      this.chars[i] = c;
+    });
+  }
+
+  /** Per-player rubber colours (hex strings), index = player seat. */
+  setPaddleColors(colors) {
+    colors.forEach((c, i) => { const m = this.paddles[i]?.userData.rubber; if (m && c) { m.color.set(c); m.emissive.set(c); } });
+  }
+
   setMode(mode, idx = 0) {
     this.mode = mode; this.idx = idx;
     this.canvas.style.touchAction = mode === 'game' ? 'none' : 'auto';
     if (mode === 'watch') this.idx = -1;
+    this.chars.forEach((c) => c && (c.group.visible = mode !== 'menu'));
   }
 
   /** Mouse/touch -> player-local paddle coords by intersecting the paddle plane. */
@@ -167,8 +189,9 @@ export class Scene {
         cam.position.set(Math.sin(a) * d, 1.55 + 0.3 * this.portrait, Math.cos(a) * d);
         cam.lookAt(0, -0.1, 0);
       } else {
-        cam.position.set(bx * 0.18, 1.0 + 0.35 * this.portrait, sgn * (3.25 + 1.75 * this.portrait));
-        cam.lookAt(bx * 0.1, -0.12, -sgn * 0.35);
+        // over-the-shoulder: high enough to see past our own player, who stands behind the paddle
+        cam.position.set(bx * 0.18, 2.7 + 0.5 * this.portrait, sgn * (4.4 + 1.7 * this.portrait));
+        cam.lookAt(bx * 0.1, -0.3, -sgn * 0.45);
       }
       const k = 1 - Math.exp(-dt * 55);
       this.ball.position.lerp(this.ballTarget, k);
@@ -181,6 +204,8 @@ export class Scene {
         const face = p === 0 ? 0 : Math.PI;
         g.rotation.set(-0.25 + THREE.MathUtils.clamp(dy * 2, -0.5, 0.5), face, THREE.MathUtils.clamp(-dx * 2.5 * (p === 0 ? 1 : -1), -0.7, 0.7), 'YXZ');
       }
+      const grip = new THREE.Vector3();
+      for (const p of [0, 1]) { this.paddles[p].updateMatrixWorld(true); grip.set(0, -0.15, 0.03).applyMatrix4(this.paddles[p].matrixWorld); this.chars[p]?.update(dt, grip); }
     } else {
       // menu: slow orbit
       const a = this.t * 0.12;

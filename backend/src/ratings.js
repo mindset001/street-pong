@@ -2,7 +2,7 @@ import { users, matches, nextId, now } from './db.js';
 
 const K = 32;
 /** Records a finished match and applies Elo for ranked/competition games. Returns rating deltas. */
-export async function recordMatch({ p1, p2 = null, s1, s2, winner, kind }) {
+export async function recordMatch({ p1, p2 = null, s1, s2, winner, kind, cpu = null }) {
   let d1 = 0, d2 = 0;
   if (p2 && (kind === 'ranked' || kind === 'competition') && winner) {
     const [a, b] = await Promise.all([users.findOne({ _id: p1 }), users.findOne({ _id: p2 })]);
@@ -17,6 +17,6 @@ export async function recordMatch({ p1, p2 = null, s1, s2, winner, kind }) {
     if (loser) await users.updateOne({ _id: loser }, { $inc: { losses: 1 } });
   }
   const _id = await nextId('matches');
-  await matches.insertOne({ _id, p1, p2, s1, s2, winner, kind, delta1: d1, delta2: d2, createdAt: now() });
+  await matches.insertOne({ _id, p1, p2, s1, s2, winner, kind, cpu, delta1: d1, delta2: d2, createdAt: now() });
   return { id: _id, d1, d2 };
 }

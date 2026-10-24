@@ -29,7 +29,8 @@ async function browser(i, token) {
   await cdp('Page.navigate', { url: `http://localhost:${PORT}/` }); await sleep(800);
   await ev(`localStorage.setItem('token', ${JSON.stringify(token)}); location.reload()`);
   await until(`document.body.innerText.includes('Welcome')`);
-  return { ev, until, shot: async (f) => { const r = await cdp('Page.captureScreenshot'); (await import('node:fs')).writeFileSync(f, Buffer.from(r.result.data, 'base64')); } };
+  const type = async (sel, text) => { await ev(`document.querySelector(${JSON.stringify(sel)}).focus()`); await cdp('Input.insertText', { text }); };
+  return { ev, until, type, shot: async (f) => { const r = await cdp('Page.captureScreenshot'); (await import('node:fs')).writeFileSync(f, Buffer.from(r.result.data, 'base64')); } };
 }
 
 try {
@@ -47,29 +48,32 @@ try {
   await sleep(500);
   const [A, B] = [await browser(0, s1.token), await browser(1, s2.token)];
   for (const X of [A, B]) {
-    await X.until(`document.querySelector('#live')?.innerText.includes(' vs ')`);
-    await X.ev(`[...document.querySelectorAll('#live button')].find((b) => b.textContent === 'Watch').click()`);
-    await X.until(`!document.querySelector('#hud').hidden && document.querySelector('#hud-leave').textContent === 'Stop watching'`);
+    await X.until(`document.querySelector('[data-testid=live-list]')?.innerText.includes(' vs ')`);
+    await X.ev(`document.querySelector('[data-testid=watch-btn]').click()`);
+    await X.until(`document.querySelector('[data-testid=hud-leave]')?.textContent === 'Stop watching'`);
   }
-  await A.ev(`[...document.querySelectorAll('#voice button')].find((b) => b.textContent.includes('Join voice')).click()`);
-  await A.until(`document.querySelector('#voice').innerText.includes('just you')`);
-  await B.ev(`[...document.querySelectorAll('#voice button')].find((b) => b.textContent.includes('Join voice')).click()`);
+  await A.ev(`document.querySelector('[data-testid=voice-join]').click()`);
+  await A.until(`document.querySelector('[data-testid=voice-panel]')?.innerText.includes('just you')`);
+  await B.ev(`document.querySelector('[data-testid=voice-join]').click()`);
   for (const X of [A, B]) {
     await X.until(`window.__pcs.length === 1 && window.__pcs[0].connectionState === 'connected'`);
     await X.until(`(async () => { const st = await window.__pcs[0].getStats(); let n = 0; st.forEach((r) => { if (r.type === 'inbound-rtp' && r.kind === 'audio') n += r.bytesReceived; }); return n > 0; })()`);
   }
-  assert.match(await A.ev(`document.querySelector('#voice').innerText`), /spec2/);
+  assert.match(await A.ev(`document.querySelector('[data-testid=voice-panel]').innerText`), /spec2/);
   // text chat: spec2 -> everyone
-  await B.ev(`document.querySelector('#chat .bar button').click()`);
-  await B.ev(`(() => { const i = document.querySelector('#chat input'); i.value = 'hi from spec2'; i.form.requestSubmit(); })()`);
-  await A.until(`document.querySelector('#chat .log').innerText.includes('spec2: hi from spec2')`);
+  await B.ev(`document.querySelector('[data-testid=chat-toggle]').click()`);
+  await B.until(`!!document.querySelector('#chat-input')`);
+  await B.type('#chat-input', 'hi from spec2');
+  await B.ev(`document.querySelector('.chat-input .ant-btn').click()`);
+  await A.until(`document.querySelector('[data-testid=chat-log]')?.innerText.includes('spec2: hi from spec2')`);
   // host (spec1) is offered Mute all, spec2 is not
-  assert.equal(await B.ev(`[...document.querySelectorAll('#chat button')].some((b) => b.textContent.includes('Mute all'))`), false);
-  await A.ev(`[...document.querySelectorAll('#chat button')].find((b) => b.textContent.includes('Mute all')).click()`);
-  await B.until(`document.querySelector('#chat input').disabled && document.querySelector('#voice').innerText.includes('Muted by host')`);
+  assert.equal(await B.ev(`!!document.querySelector('[data-testid=mute-all]')`), false);
+  await A.ev(`document.querySelector('[data-testid=mute-all]').click()`);
+  await B.until(`document.querySelector('#chat-input').disabled && document.querySelector('[data-testid=voice-panel]').innerText.includes('Muted by host')`);
   assert.equal(await B.ev(`window.__pcs.length === 1`), true);
-  await A.ev(`[...document.querySelectorAll('#chat button')].find((b) => b.textContent.includes('Unmute all')).click()`);
-  await B.until(`!document.querySelector('#chat input').disabled && !document.querySelector('#voice').innerText.includes('Muted by host')`);
+  await A.until(`document.querySelector('[data-testid=mute-all]').textContent.includes('Unmute all')`);
+  await A.ev(`document.querySelector('[data-testid=mute-all]').click()`);
+  await B.until(`!document.querySelector('#chat-input').disabled && !document.querySelector('[data-testid=voice-panel]').innerText.includes('Muted by host')`);
   if (process.env.SHOT) await A.shot(process.env.SHOT);
   console.log('voice ok');
   end(0);

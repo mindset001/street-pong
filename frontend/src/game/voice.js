@@ -2,14 +2,17 @@
 // Whoever joins creates the offers to the people already in the room. Mic is optional: without
 // one you join listen-only.
 export class Voice {
-  constructor(send, onChange, onError) {
-    this.send = send; this.onChange = onChange; this.onError = onError;
+  constructor(send) {
+    this.send = send; this.listeners = new Set(); this.onError = () => {};
     this.peers = new Map(); this.names = new Map(); this.stream = null; this.active = false; this.muted = false; this.forced = false; this.ice = [];
   }
 
+  subscribe(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
+  onChange() { this.listeners.forEach((fn) => fn()); }
+
   async join() {
     if (this.active || this.joining) return;
-    this.joining = true;
+    this.joining = true; this.onChange();
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
     } catch {

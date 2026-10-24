@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
 import { users, matches, client } from './db.js';
-import { router as authRouter, requireAuth, publicUser } from './auth.js';
+import { router as authRouter, requireAuth, publicUser, playerLook } from './auth.js';
 import { router as compRouter } from './competitions.js';
 import { attach, stats, liveGames } from './lobby.js';
 
@@ -16,7 +16,7 @@ export const ORIGINS = (process.env.CORS_ORIGIN || '').split(',').map((x) => x.t
 app.use((req, res, next) => {
   const o = req.headers.origin;
   if (o && (ORIGINS.includes('*') || ORIGINS.includes(o))) {
-    res.set({ 'Access-Control-Allow-Origin': o, Vary: 'Origin', 'Access-Control-Allow-Headers': 'Authorization, Content-Type', 'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS', 'Access-Control-Max-Age': '600' });
+    res.set({ 'Access-Control-Allow-Origin': o, Vary: 'Origin', 'Access-Control-Allow-Headers': 'Authorization, Content-Type', 'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS', 'Access-Control-Max-Age': '600' });
     if (req.method === 'OPTIONS') return res.sendStatus(204);
   }
   next();
@@ -60,16 +60,16 @@ app.get('/api/users/:name', requireAuth, wrap(async (req, res) => {
   const recent = rows.map((m) => {
     const mine = m.p1 === u._id;
     return {
-      id: m._id, kind: m.kind, at: m.createdAt, opponent: (mine ? names.get(m.p2) : names.get(m.p1)) ?? 'CPU',
+      id: m._id, kind: m.kind, at: m.createdAt, opponent: (mine ? names.get(m.p2) : names.get(m.p1)) ?? m.cpu ?? 'CPU',
       score: mine ? [m.s1, m.s2] : [m.s2, m.s1], won: m.winner === u._id, delta: mine ? m.delta1 : m.delta2,
     };
   });
   res.json({ user: publicUser(u), rank, recent });
 }));
 
-// Local dev convenience: if the sibling ../frontend folder exists, serve it too. A deployed backend-only
+// Local convenience: if the frontend has been built (frontend/dist), serve it too. A deployed backend-only
 // service simply won't have it.
-const frontendDir = fileURLToPath(new URL('../../frontend', import.meta.url));
+const frontendDir = fileURLToPath(new URL('../../frontend/dist', import.meta.url));
 if (existsSync(frontendDir)) app.use(express.static(frontendDir));
 app.use((err, req, res, next) => { console.error(err); res.status(500).json({ error: 'Server error' }); });
 

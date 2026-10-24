@@ -1,6 +1,7 @@
 import { WebSocketServer } from 'ws';
 import { Game, C } from './physics.js';
-import { AI, LEVELS } from './ai.js';
+import { AI, LEVELS, CPU } from './ai.js';
+import { playerLook } from './auth.js';
 import { verify } from './auth.js';
 import { users, competitions, cmatches } from './db.js';
 import { recordMatch } from './ratings.js';
@@ -25,7 +26,7 @@ let nextId = 1;
 const send = (ws, msg) => { if (ws?.readyState === 1) ws.send(JSON.stringify(msg)); };
 const sendUser = (uid, msg) => send(clients.get(uid)?.ws, msg);
 const broadcast = (msg) => { const s = JSON.stringify(msg); for (const c of clients.values()) if (c.ws.readyState === 1) c.ws.send(s); };
-const userRow = async (id) => { const u = await users.findOne({ _id: id }); return u && { id: u._id, username: u.username, rating: u.rating }; };
+const userRow = async (id) => { const u = await users.findOne({ _id: id }); return u && { id: u._id, username: u.username, rating: u.rating, ...playerLook(u) }; };
 const logErr = (e) => console.error(e);
 const starting = new Set();  // users whose game is being set up (DB lookups in flight)
 
@@ -67,9 +68,9 @@ async function startSession({ kind, humans, ai, compMatch }) {
 }
 
 function sendStart(s, idx, resume = false, to = s.humans[idx]) {
-  const players = s.users.map((u, i) => (u ? { username: u.username, rating: u.rating } : { username: `CPU (${s.aiLevel})`, rating: null }));
+  const players = s.users.map((u) => (u ? { username: u.username, rating: u.rating, avatar: u.avatar, color: u.color, paddle: u.paddle, char: u.char } : { username: CPU[s.aiLevel].name, rating: null, cpu: true, level: s.aiLevel, avatar: CPU[s.aiLevel].avatar, color: CPU[s.aiLevel].color, paddle: CPU[s.aiLevel].paddle, char: CPU[s.aiLevel].char }));
   sendUser(to, {
-    t: 'start', gid: s.id, you: idx, spectator: idx < 0, host: s.hostId === to, hasHost: s.hostId !== null, muted: s.muted, chat: s.chat, kind: s.kind, target: TARGET, players, resume, score: s.game.score,
+    t: 'start', gid: s.id, level: s.aiLevel, you: idx, spectator: idx < 0, host: s.hostId === to, hasHost: s.hostId !== null, muted: s.muted, chat: s.chat, kind: s.kind, target: TARGET, players, resume, score: s.game.score,
     comp: s.compMatch ? { id: s.compMatch.compId, matchId: s.compMatch.id } : null,
   });
 }
@@ -94,7 +95,7 @@ async function finish(s, winnerIdx, forfeit = false) {
   try {
     if (s.kind === 'ai') {
       // Only completed games vs the CPU are logged (no rating change).
-      if (!forfeit && u1) await recordMatch({ p1: u1.id, p2: null, s1: a, s2: b, winner: winnerIdx === 0 ? u1.id : null, kind: 'ai' });
+      if (!forfeit && u1) await recordMatch({ p1: u1.id, p2: null, s1: a, s2: b, winner: winnerIdx === 0 ? u1.id : null, kind: 'ai', cpu: CPU[s.aiLevel].name });
     } else {
       const rec = await recordMatch({ p1: u1.id, p2: u2.id, s1: a, s2: b, winner: wId, kind: s.kind });
       Object.assign(res, { d1: rec.d1, d2: rec.d2 });
@@ -125,7 +126,7 @@ function voiceLeave(uid, s) {
 
 export function liveGames() {
   return [...sessions.values()].map((s) => ({
-    gid: s.id, kind: s.kind, players: s.users.map((u) => u?.username ?? `CPU (${s.aiLevel})`), score: s.game.score,
+    gid: s.id, kind: s.kind, players: s.users.map((u) => u?.username ?? CPU[s.aiLevel].name), avatars: s.users.map((u) => u?.avatar ?? CPU[s.aiLevel].avatar), score: s.game.score,
     spectators: s.spectators.size, voice: s.voice.size,
     competition: s.compName,
   })).filter((g) => g.kind !== 'ai');

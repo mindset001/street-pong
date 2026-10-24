@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { randomInt } from 'node:crypto';
 import { users, competitions, cmatches, nextId, now, isDup } from './db.js';
-import { requireAuth } from './auth.js';
+import { requireAuth, playerLook } from './auth.js';
 
 export const router = Router();
 const hooks = { changed: () => {}, matchReady: () => {}, readyUsers: () => [], liveGid: () => null };
@@ -23,7 +23,8 @@ export async function details(id, meId) {
   if (!c) return null;
   const rows = await cmatches.find({ competitionId: id }).sort({ round: 1, slot: 1 }).toArray();
   const names = await nameMap([c.creatorId, c.championId, ...c.players.map((p) => p.userId), ...rows.flatMap((m) => [m.p1, m.p2])]);
-  const who = (uid) => (uid ? { id: uid, username: names.get(uid)?.username ?? '?' } : null);
+  const who = (uid) => (uid ? { id: uid, username: names.get(uid)?.username ?? '?', avatar: look(uid).avatar, color: look(uid).color } : null);
+  const look = (uid) => (names.get(uid) ? playerLook(names.get(uid)) : {});
   const rounds = [];
   for (const m of rows) {
     (rounds[m.round - 1] ??= []).push({
@@ -34,7 +35,7 @@ export async function details(id, meId) {
       readyDeadline: m.status === 'ready' ? m.readyAt + READY_TIMEOUT : null,
     });
   }
-  const players = c.players.map((p) => ({ id: p.userId, username: names.get(p.userId)?.username ?? '?', rating: names.get(p.userId)?.rating ?? 1000 }));
+  const players = c.players.map((p) => ({ id: p.userId, username: names.get(p.userId)?.username ?? '?', rating: names.get(p.userId)?.rating ?? 1000, avatar: look(p.userId).avatar, color: look(p.userId).color }));
   return {
     id: c._id, code: c.inviteCode, name: c.name, size: c.size, status: c.status, creatorId: c.creatorId, creator: names.get(c.creatorId)?.username,
     champion: c.championId ? who(c.championId) : null, players, rounds, joined: !!meId && players.some((p) => p.id === meId),
