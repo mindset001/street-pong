@@ -7,9 +7,16 @@ import { users, nextId, now, isDup } from './db.js';
 
 function loadSecret() {
   if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
-  const f = new URL('../data/jwt.secret', import.meta.url).pathname;
-  if (!existsSync(f)) { mkdirSync(new URL('../data', import.meta.url).pathname, { recursive: true }); writeFileSync(f, randomBytes(48).toString('hex'), { mode: 0o600 }); }
-  return readFileSync(f, 'utf8');
+  // Dev convenience: persist a generated secret. Hosts with read-only/ephemeral disks can't, so fall back to a
+  // per-process secret (everyone is logged out on each restart) and say so loudly. Set JWT_SECRET in production.
+  try {
+    const dir = new URL('../data', import.meta.url).pathname, f = `${dir}/jwt.secret`;
+    if (!existsSync(f)) { mkdirSync(dir, { recursive: true }); writeFileSync(f, randomBytes(48).toString('hex'), { mode: 0o600 }); }
+    return readFileSync(f, 'utf8');
+  } catch {
+    console.warn('WARNING: JWT_SECRET is not set and data/ is not writable; using a temporary secret. Set JWT_SECRET so logins survive restarts.');
+    return randomBytes(48).toString('hex');
+  }
 }
 const SECRET = loadSecret();
 
